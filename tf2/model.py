@@ -97,7 +97,7 @@ class WarmUpAndCosineDecay(tf.keras.optimizers.schedules.LearningRateSchedule):
         raise ValueError('Unknown learning rate scaling {}'.format(
             FLAGS.learning_rate_scaling))
       learning_rate = (
-          float(step) / float(warmup_steps) * scaled_lr if warmup_steps else scaled_lr)
+          tf.cast(step, tf.float32) / float(warmup_steps) * tf.cast(scaled_lr, tf.float32) if warmup_steps else scaled_lr)
 
       # Cosine decay learning rate schedule
       total_steps = get_train_steps(self.num_examples)
