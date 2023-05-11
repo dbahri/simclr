@@ -51,7 +51,7 @@ class BatchNormRelu(tf.keras.layers.Layer):  # pylint: disable=missing-docstring
       # TODO(srbs): Set fused=True
       # Batch normalization layers with fused=True only support 4D input
       # tensors.
-      self.bn = tf.keras.layers.experimental.SyncBatchNormalization(
+      self.bn = tf.keras.layers.BatchNormalization(
           axis=axis,
           momentum=FLAGS.batch_norm_decay,
           epsilon=BATCH_NORM_EPSILON,
