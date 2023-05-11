@@ -35,7 +35,7 @@ import tensorflow_datasets as tfds
 import tensorflow_hub as hub
 
 
-FLAGS = flags.FLAGS
+FLAGS = flags.F
 
 
 flags.DEFINE_float(
