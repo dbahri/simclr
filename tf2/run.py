@@ -471,7 +471,6 @@ def main(argv):
   if len(argv) > 1:
     raise app.UsageError('Too many command-line arguments.')
 
-
   builder = tfds.builder(FLAGS.dataset, data_dir=FLAGS.data_dir)
   builder.download_and_prepare()
   num_train_examples = builder.info.splits[FLAGS.train_split].num_examples
@@ -697,7 +696,7 @@ def _gradients_order2_norm(gradients):
   norm = tf.norm(tf.stack([tf.norm(grad) for grad in gradients if grad is not None]))
   return norm
 
-def _distributed_apply_epsilon_w(self, var, epsilon_w):
+def _distributed_apply_epsilon_w(var, epsilon_w):
   # Helper function to apply epsilon_w on model variables.
   # if isinstance(tf.distribute.get_strategy(), (
   #     tf.distribute.experimental.ParameterServerStrategy,
