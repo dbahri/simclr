@@ -38,6 +38,10 @@ flags.DEFINE_float(
     'learning_rate', 0.3,
     'Initial learning rate per batch size of 256.')
 
+flags.DEFINE_float(
+    'sam_rho', 0.,
+    'sam rho')
+
 flags.DEFINE_enum(
     'learning_rate_scaling', 'linear', ['linear', 'sqrt'],
     'How to scale the learning rate as a function of batch size.')
@@ -173,7 +177,7 @@ flags.DEFINE_string(
     'Name for eval.')
 
 flags.DEFINE_integer(
-    'keep_checkpoint_max', 5,
+    'keep_checkpoint_max', None,
     'Maximum number of checkpoints to keep.')
 
 flags.DEFINE_integer(
@@ -533,8 +537,9 @@ def main(argv):
       # Build metrics.
       all_metrics = []  # For summaries.
       weight_decay_metric = tf.keras.metrics.Mean('train/weight_decay')
-      total_loss_metric = tf.keras.metrics.Mean('train/total_loss')
-      all_metrics.extend([weight_decay_metric, total_loss_metric])
+      loss_metric = tf.keras.metrics.Mean('train/loss')
+      sam_loss_metric = tf.keras.metrics.Mean('train/sam_loss')
+      all_metrics.extend([weight_decay_metric, loss_metric, sam_loss_metric])
       if FLAGS.train_mode == 'pretrain':
         contrast_loss_metric = tf.keras.metrics.Mean('train/contrast_loss')
         contrast_acc_metric = tf.keras.metrics.Mean('train/contrast_acc')
@@ -555,7 +560,7 @@ def main(argv):
     steps_per_loop = checkpoint_steps
 
     def single_step(features, labels):
-      with tf.GradientTape() as tape:
+      def get_loss(do_log=True):
         # Log summaries on the last step of the training loop to match
         # logging frequency of other scalar summaries.
         #
@@ -572,10 +577,9 @@ def main(argv):
         should_record = tf.equal((optimizer.iterations + 1) % steps_per_loop, 0)
         with tf.summary.record_if(should_record):
           # Only log augmented images for the first tower.
-          tf.summary.image(
-              'image', features[:, :, :, :3], step=optimizer.iterations + 1)
-        projection_head_outputs, supervised_head_outputs = model(
-            features, training=True)
+          if do_log:
+            tf.summary.image('image', features[:, :, :, :3], step=optimizer.iterations + 1)
+        projection_head_outputs, supervised_head_outputs = model(features, training=True)
         loss = None
         if projection_head_outputs is not None:
           outputs = projection_head_outputs
@@ -588,11 +592,12 @@ def main(argv):
             loss = con_loss
           else:
             loss += con_loss
-          metrics.update_pretrain_metrics_train(contrast_loss_metric,
-                                                contrast_acc_metric,
-                                                contrast_entropy_metric,
-                                                con_loss, logits_con,
-                                                labels_con)
+          if do_log:
+            metrics.update_pretrain_metrics_train(contrast_loss_metric,
+                                                  contrast_acc_metric,
+                                                  contrast_entropy_metric,
+                                                  con_loss, logits_con,
+                                                  labels_con)
         if supervised_head_outputs is not None:
           outputs = supervised_head_outputs
           l = labels['labels']
@@ -603,26 +608,51 @@ def main(argv):
             loss = sup_loss
           else:
             loss += sup_loss
-          metrics.update_finetune_metrics_train(supervised_loss_metric,
-                                                supervised_acc_metric, sup_loss,
-                                                l, outputs)
-        weight_decay = model_lib.add_weight_decay(
-            model, adjust_per_optimizer=True)
-        weight_decay_metric.update_state(weight_decay)
-        loss += weight_decay
-        total_loss_metric.update_state(loss)
+          if do_log:
+            metrics.update_finetune_metrics_train(supervised_loss_metric,
+                                                  supervised_acc_metric, sup_loss,
+                                                  l, outputs)
+        return loss
+
+      if FLAGS.sam_rho <= 0.0:
+        with tf.GradientTape() as tape:
+          loss = get_loss(do_log=True)
+          weight_decay = model_lib.add_weight_decay(model, adjust_per_optimizer=True)
+          weight_decay_metric.update_state(weight_decay)
+          loss += weight_decay
+        gradients = tape.gradient(loss, model.trainable_variables)
+        loss = loss / strategy.num_replicas_in_sync
+        optimizer.apply_gradients(zip(gradients, model.trainable_variables))
+      else:
+        with tf.GradientTape() as tape:
+          loss = get_loss(do_log=True)
+        epsilon_w_cache = []
+        loss_metric.update_state(loss)
+        gradients = tape.gradient(loss, model.trainable_variables)
+        gradients_order2_norm = _gradients_order2_norm(gradients)
+        scale = FLAGS.sam_rho / (gradients_order2_norm + 1e-12)
+        for gradient, variable in zip(gradients, model.trainable_variables):
+          epsilon_w = gradient * scale
+          _distributed_apply_epsilon_w(variable, epsilon_w)
+          epsilon_w_cache.append(epsilon_w)
+        with tf.GradientTape() as tape:
+          loss = get_loss(do_log=False)
+          weight_decay = model_lib.add_weight_decay(model, adjust_per_optimizer=True)
+          weight_decay_metric.update_state(weight_decay)
+          loss += weight_decay
+        sam_loss_metric.update_state(loss)
         # The default behavior of `apply_gradients` is to sum gradients from all
         # replicas so we divide the loss by the number of replicas so that the
         # mean gradient is applied.
         loss = loss / strategy.num_replicas_in_sync
-        logging.info('Trainable variables:')
-        for var in model.trainable_variables:
-          logging.info(var.name)
-        grads = tape.gradient(loss, model.trainable_variables)
-        optimizer.apply_gradients(zip(grads, model.trainable_variables))
 
-    with strategy.scope():
+        gradients = tape.gradient(loss, model.trainable_variables)
+        for variable, epsilon_w in zip(model.trainable_variables, epsilon_w_cache):
+          # Restore the variable to its original value before `apply_gradients()`.
+          _distributed_apply_epsilon_w(variable, -epsilon_w)
 
+        optimizer.apply_gradients(zip(gradients, model.trainable_variables))
+      
       @tf.function
       def train_multiple_steps(iterator):
         # `tf.range` is needed so that this runs in a `tf.while_loop` and is
@@ -663,6 +693,30 @@ def main(argv):
                          checkpoint_manager.latest_checkpoint, strategy,
                          topology)
 
+def _gradients_order2_norm(gradients):
+  norm = tf.norm(tf.stack([tf.norm(grad) for grad in gradients if grad is not None]))
+  return norm
+
+def _distributed_apply_epsilon_w(self, var, epsilon_w):
+  # Helper function to apply epsilon_w on model variables.
+  # if isinstance(tf.distribute.get_strategy(), (
+  #     tf.distribute.experimental.ParameterServerStrategy,
+  #     tf.distribute.experimental.CentralStorageStrategy,),
+  #               ):
+  #   # Under PSS and CSS, the AggregatingVariable has to be kept in sync.
+  #   def distribute_apply(strategy, var, epsilon_w):
+  #       strategy.extended.update(
+  #           var,
+  #           lambda x, y: x.assign_add(y),
+  #           args=(epsilon_w,),
+  #           group=False,
+  #       )
+
+  #   tf.__internal__.distribute.interim.maybe_merge_call(
+  #       distribute_apply, tf.distribute.get_strategy(), var, epsilon_w
+  #   )
+  # else:
+  var.assign_add(epsilon_w)
 
 if __name__ == '__main__':
   tf.compat.v1.enable_v2_behavior()
