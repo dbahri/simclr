@@ -18,6 +18,7 @@
 import json
 import math
 import os
+import numpy as np
 
 from absl import app
 from absl import flags
@@ -40,7 +41,9 @@ flags.DEFINE_float(
     'sam_rho', 0.,
     'sam rho')
 
-flags.DEFINE_integer('gpu_id', 0, '')
+flags.DEFINE_integer('device_id', 0, '')
+
+flags.DEFINE_string('device_type', 'cpu', '')
 
 flags.DEFINE_enum(
     'learning_rate_scaling', 'linear', ['linear', 'sqrt'],
@@ -436,6 +439,17 @@ def perform_evaluation(model, builder, eval_steps, ckpt, strategy, topology):
   return result
 
 
+def calc_pca_rank(X, thresholds):
+  # (n_examples, n_features)
+  X = X - np.mean(X, axis=1, keepdims=True)
+  s = np.linalg.svd(X, full_matrices=False, compute_uv=False)
+  p_eigs = s**2
+  p_cumsum = np.cumsum(p_eigs)
+  n_components = []
+  for threshold in thresholds:
+    n_components.append(np.sum(p_cumsum <= np.sum(p_eigs)*threshold)+1)
+  return n_components
+
 def _restore_latest_or_from_pretrain(checkpoint_manager):
   """Restores the latest ckpt if training already.
 
@@ -509,7 +523,7 @@ def main(argv):
     # strategy = tf.distribute.MirroredStrategy()
     # logging.info('Running using MirroredStrategy on %d replicas',
     #              strategy.num_replicas_in_sync)
-    strategy = tf.distribute.OneDeviceStrategy(device=("/gpu:%d" % FLAGS.gpu_id))
+    strategy = tf.distribute.OneDeviceStrategy(device=(f"/{FLAGS.device_type}:%d" % FLAGS.device_id))
 
   with strategy.scope():
     model = model_lib.Model(num_classes)
@@ -669,6 +683,31 @@ def main(argv):
             features, labels = images, {'labels': labels}
             strategy.run(single_step, (features, labels))
 
+      def compute_train_rank(percentiles, global_step, n_samples=None):
+        fn = data_lib.get_preprocess_fn(False, False)
+        def map_fn(image, label):
+          image = fn(image)
+          return image
+        dataset = builder.as_dataset(
+            split=FLAGS.train_split,
+            shuffle_files=False,
+            as_supervised=True)
+        dataset = dataset.map(map_fn, num_parallel_calls=tf.data.experimental.AUTOTUNE)
+        dataset = dataset.batch(FLAGS.train_batch_size, drop_remainder=False)
+        dataset = dataset.prefetch(tf.data.experimental.AUTOTUNE)
+        outs = []
+        for feats in iter(dataset):
+          if outs and n_samples and sum([x.shape[0] for x in outs]) >= n_samples:
+            break
+          o, _ = model(feats, training=False)
+          outs.append(o.numpy())
+        outs = np.concatenate(outs, axis=0)
+        if n_samples:
+          outs = outs[:n_samples, :]
+        n_components = calc_pca_rank(outs, np.array(percentiles, dtype=np.float32)/100.)
+        for i, p in enumerate(percentiles):
+          tf.summary.scalar(f'n_components_{p}', n_components[i], global_step)
+          
       global_step = optimizer.iterations
       cur_step = global_step.numpy()
       iterator = iter(ds)
@@ -676,11 +715,13 @@ def main(argv):
         # Calls to tf.summary.xyz lookup the summary writer resource which is
         # set by the summary writer's context manager.
         with summary_writer.as_default():
+          compute_train_rank([95, 98, 99, 99.9, 99.99], global_step, n_samples=10240)
           train_multiple_steps(iterator)
           cur_step = global_step.numpy()
           checkpoint_manager.save(cur_step)
           logging.info('Completed: %d / %d steps', cur_step, train_steps)
           metrics.log_and_write_metrics_to_summary(all_metrics, cur_step)
+          # compute_train_rank()
           tf.summary.scalar(
               'learning_rate',
               learning_rate(tf.cast(global_step, dtype=tf.float32)),
