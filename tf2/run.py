@@ -628,7 +628,7 @@ def main(argv):
       return loss
 
     def single_step(features, labels):
-      if FLAGS.sam_rho <= 0.0:
+      if FLAGS.sam_rho < 0.0:
         with tf.GradientTape() as tape:
           loss = get_loss(features, labels, model, do_log=True)
           weight_decay = model_lib.add_weight_decay(model, adjust_per_optimizer=True)
