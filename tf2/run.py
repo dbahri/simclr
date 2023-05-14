@@ -42,6 +42,8 @@ flags.DEFINE_float(
     'sam_rho', 0.,
     'sam rho')
 
+flags.DEFINE_integer('gpu_id', 0., '')
+
 flags.DEFINE_enum(
     'learning_rate_scaling', 'linear', ['linear', 'sqrt'],
     'How to scale the learning rate as a function of batch size.')
@@ -506,10 +508,10 @@ def main(argv):
 
   else:
     # For (multiple) GPUs.
-    strategy = tf.distribute.MirroredStrategy()
-    logging.info('Running using MirroredStrategy on %d replicas',
-                 strategy.num_replicas_in_sync)
-    # strategy = tf.distribute.OneDeviceStrategy(device="/gpu:0")
+    # strategy = tf.distribute.MirroredStrategy()
+    # logging.info('Running using MirroredStrategy on %d replicas',
+    #              strategy.num_replicas_in_sync)
+    strategy = tf.distribute.OneDeviceStrategy(device=("/gpu:%d" % FLAGS.gpu_id))
 
   with strategy.scope():
     model = model_lib.Model(num_classes)
