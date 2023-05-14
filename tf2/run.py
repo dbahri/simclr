@@ -506,9 +506,10 @@ def main(argv):
 
   else:
     # For (multiple) GPUs.
-    strategy = tf.distribute.MirroredStrategy()
-    logging.info('Running using MirroredStrategy on %d replicas',
-                 strategy.num_replicas_in_sync)
+    # strategy = tf.distribute.MirroredStrategy()
+    # logging.info('Running using MirroredStrategy on %d replicas',
+    #              strategy.num_replicas_in_sync)
+    strategy = tf.distribute.OneDeviceStrategy(device="/gpu:0")
 
   with strategy.scope():
     model = model_lib.Model(num_classes)
@@ -559,7 +560,7 @@ def main(argv):
     steps_per_loop = checkpoint_steps
 
     def single_step(features, labels):
-      def get_loss(do_log=True):
+      def get_loss(features_, labels_, model_, do_log=True):
         # Log summaries on the last step of the training loop to match
         # logging frequency of other scalar summaries.
         #
@@ -577,8 +578,8 @@ def main(argv):
         with tf.summary.record_if(should_record):
           # Only log augmented images for the first tower.
           if do_log:
-            tf.summary.image('image', features[:, :, :, :3], step=optimizer.iterations + 1)
-        projection_head_outputs, supervised_head_outputs = model(features, training=True)
+            tf.summary.image('image', features_[:, :, :, :3], step=optimizer.iterations + 1)
+        projection_head_outputs, supervised_head_outputs = model_(features_, training=True)
         loss = None
         if projection_head_outputs is not None:
           outputs = projection_head_outputs
@@ -599,7 +600,7 @@ def main(argv):
                                                   labels_con)
         if supervised_head_outputs is not None:
           outputs = supervised_head_outputs
-          l = labels['labels']
+          l = labels_['labels']
           if FLAGS.train_mode == 'pretrain' and FLAGS.lineareval_while_pretraining:
             l = tf.concat([l, l], 0)
           sup_loss = obj_lib.add_supervised_loss(labels=l, logits=outputs)
@@ -615,7 +616,7 @@ def main(argv):
 
       if FLAGS.sam_rho <= 0.0:
         with tf.GradientTape() as tape:
-          loss = get_loss(do_log=True)
+          loss = get_loss(features, labels, model, do_log=True)
           weight_decay = model_lib.add_weight_decay(model, adjust_per_optimizer=True)
           weight_decay_metric.update_state(weight_decay)
           loss += weight_decay
@@ -624,7 +625,7 @@ def main(argv):
         optimizer.apply_gradients(zip(gradients, model.trainable_variables))
       else:
         with tf.GradientTape() as tape:
-          loss = get_loss(do_log=True)
+          loss = get_loss(features, labels, model, do_log=True)
         epsilon_w_cache = []
         loss_metric.update_state(loss)
         gradients = tape.gradient(loss, model.trainable_variables)
@@ -635,7 +636,7 @@ def main(argv):
           _distributed_apply_epsilon_w(variable, epsilon_w)
           epsilon_w_cache.append(epsilon_w)
         with tf.GradientTape() as tape:
-          loss = get_loss(do_log=False)
+          loss = get_loss(features, labels, model, do_log=False)
           weight_decay = model_lib.add_weight_decay(model, adjust_per_optimizer=True)
           weight_decay_metric.update_state(weight_decay)
           loss += weight_decay
@@ -651,7 +652,9 @@ def main(argv):
           _distributed_apply_epsilon_w(variable, -epsilon_w)
 
         optimizer.apply_gradients(zip(gradients, model.trainable_variables))
-      
+
+    with strategy.scope():
+
       @tf.function
       def train_multiple_steps(iterator):
         # `tf.range` is needed so that this runs in a `tf.while_loop` and is
@@ -718,6 +721,7 @@ def _distributed_apply_epsilon_w(var, epsilon_w):
   var.assign_add(epsilon_w)
 
 if __name__ == '__main__':
+  print("start------")
   tf.compat.v1.enable_v2_behavior()
   # For outside compilation of summaries on TPU.
   tf.config.set_soft_device_placement(True)
