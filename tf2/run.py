@@ -559,61 +559,61 @@ def main(argv):
 
     steps_per_loop = checkpoint_steps
 
-    def single_step(features, labels):
-      def get_loss(features_, labels_, model_, do_log=True):
-        # Log summaries on the last step of the training loop to match
-        # logging frequency of other scalar summaries.
-        #
-        # Notes:
-        # 1. Summary ops on TPUs get outside compiled so they do not affect
-        #    performance.
-        # 2. Summaries are recorded only on replica 0. So effectively this
-        #    summary would be written once per host when should_record == True.
-        # 3. optimizer.iterations is incremented in the call to apply_gradients.
-        #    So we use  `iterations + 1` here so that the step number matches
-        #    those of scalar summaries.
-        # 4. We intentionally run the summary op before the actual model
-        #    training so that it can run in parallel.
-        should_record = tf.equal((optimizer.iterations + 1) % steps_per_loop, 0)
-        with tf.summary.record_if(should_record):
-          # Only log augmented images for the first tower.
-          if do_log:
-            tf.summary.image('image', features_[:, :, :, :3], step=optimizer.iterations + 1)
-        projection_head_outputs, supervised_head_outputs = model_(features_, training=True)
-        loss = None
-        if projection_head_outputs is not None:
-          outputs = projection_head_outputs
-          con_loss, logits_con, labels_con = obj_lib.add_contrastive_loss(
-              outputs,
-              hidden_norm=FLAGS.hidden_norm,
-              temperature=FLAGS.temperature,
-              strategy=strategy)
-          if loss is None:
-            loss = con_loss
-          else:
-            loss += con_loss
-          if do_log:
-            metrics.update_pretrain_metrics_train(contrast_loss_metric,
-                                                  contrast_acc_metric,
-                                                  contrast_entropy_metric,
-                                                  con_loss, logits_con,
-                                                  labels_con)
-        if supervised_head_outputs is not None:
-          outputs = supervised_head_outputs
-          l = labels_['labels']
-          if FLAGS.train_mode == 'pretrain' and FLAGS.lineareval_while_pretraining:
-            l = tf.concat([l, l], 0)
-          sup_loss = obj_lib.add_supervised_loss(labels=l, logits=outputs)
-          if loss is None:
-            loss = sup_loss
-          else:
-            loss += sup_loss
-          if do_log:
-            metrics.update_finetune_metrics_train(supervised_loss_metric,
-                                                  supervised_acc_metric, sup_loss,
-                                                  l, outputs)
-        return loss
+    def get_loss(features_, labels_, model_, do_log=True):
+      # Log summaries on the last step of the training loop to match
+      # logging frequency of other scalar summaries.
+      #
+      # Notes:
+      # 1. Summary ops on TPUs get outside compiled so they do not affect
+      #    performance.
+      # 2. Summaries are recorded only on replica 0. So effectively this
+      #    summary would be written once per host when should_record == True.
+      # 3. optimizer.iterations is incremented in the call to apply_gradients.
+      #    So we use  `iterations + 1` here so that the step number matches
+      #    those of scalar summaries.
+      # 4. We intentionally run the summary op before the actual model
+      #    training so that it can run in parallel.
+      should_record = tf.equal((optimizer.iterations + 1) % steps_per_loop, 0)
+      with tf.summary.record_if(should_record):
+        # Only log augmented images for the first tower.
+        if do_log:
+          tf.summary.image('image', features_[:, :, :, :3], step=optimizer.iterations + 1)
+      projection_head_outputs, supervised_head_outputs = model_(features_, training=True)
+      loss = None
+      if projection_head_outputs is not None:
+        outputs = projection_head_outputs
+        con_loss, logits_con, labels_con = obj_lib.add_contrastive_loss(
+            outputs,
+            hidden_norm=FLAGS.hidden_norm,
+            temperature=FLAGS.temperature,
+            strategy=strategy)
+        if loss is None:
+          loss = con_loss
+        else:
+          loss += con_loss
+        if do_log:
+          metrics.update_pretrain_metrics_train(contrast_loss_metric,
+                                                contrast_acc_metric,
+                                                contrast_entropy_metric,
+                                                con_loss, logits_con,
+                                                labels_con)
+      if supervised_head_outputs is not None:
+        outputs = supervised_head_outputs
+        l = labels_['labels']
+        if FLAGS.train_mode == 'pretrain' and FLAGS.lineareval_while_pretraining:
+          l = tf.concat([l, l], 0)
+        sup_loss = obj_lib.add_supervised_loss(labels=l, logits=outputs)
+        if loss is None:
+          loss = sup_loss
+        else:
+          loss += sup_loss
+        if do_log:
+          metrics.update_finetune_metrics_train(supervised_loss_metric,
+                                                supervised_acc_metric, sup_loss,
+                                                l, outputs)
+      return loss
 
+    def single_step(features, labels):
       if FLAGS.sam_rho <= 0.0:
         with tf.GradientTape() as tape:
           loss = get_loss(features, labels, model, do_log=True)
@@ -624,14 +624,14 @@ def main(argv):
         loss = loss / strategy.num_replicas_in_sync
         optimizer.apply_gradients(zip(gradients, model.trainable_variables))
       else:
+        trainable_variables = model.trainable_variables
         with tf.GradientTape() as tape:
-          loss = get_loss(features, labels, model, do_log=True)
+          loss = get_loss(features, labels, model, do_log=False)
+          gradients = tape.gradient(loss, trainable_variables)
         epsilon_w_cache = []
         loss_metric.update_state(loss)
-        gradients = tape.gradient(loss, model.trainable_variables)
         gradients_order2_norm = _gradients_order2_norm(gradients)
         scale = FLAGS.sam_rho / (gradients_order2_norm + 1e-12)
-        trainable_variables = model.trainable_variables
         for gradient, variable in zip(gradients, trainable_variables):
           epsilon_w = gradient * scale
           _distributed_apply_epsilon_w(variable, epsilon_w)
@@ -641,13 +641,12 @@ def main(argv):
           weight_decay = model_lib.add_weight_decay(model, adjust_per_optimizer=True)
           weight_decay_metric.update_state(weight_decay)
           loss += weight_decay
-        sam_loss_metric.update_state(loss)
-        # The default behavior of `apply_gradients` is to sum gradients from all
-        # replicas so we divide the loss by the number of replicas so that the
-        # mean gradient is applied.
-        loss = loss / strategy.num_replicas_in_sync
-
-        gradients = tape.gradient(loss, trainable_variables)
+          sam_loss_metric.update_state(loss)
+          # The default behavior of `apply_gradients` is to sum gradients from all
+          # replicas so we divide the loss by the number of replicas so that the
+          # mean gradient is applied.
+          loss = loss / strategy.num_replicas_in_sync
+          gradients = tape.gradient(loss, trainable_variables)
         for variable, epsilon_w in zip(trainable_variables, epsilon_w_cache):
           # Restore the variable to its original value before `apply_gradients()`.
           _distributed_apply_epsilon_w(variable, -epsilon_w)
@@ -656,7 +655,7 @@ def main(argv):
 
     with strategy.scope():
 
-      @tf.function
+      # @tf.function
       def train_multiple_steps(iterator):
         # `tf.range` is needed so that this runs in a `tf.while_loop` and is
         # not unrolled.
@@ -722,7 +721,6 @@ def _distributed_apply_epsilon_w(var, epsilon_w):
   var.assign_add(epsilon_w)
 
 if __name__ == '__main__':
-  print("start------")
   tf.compat.v1.enable_v2_behavior()
   # For outside compilation of summaries on TPU.
   tf.config.set_soft_device_placement(True)
