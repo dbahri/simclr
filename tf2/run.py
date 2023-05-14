@@ -29,8 +29,6 @@ import objective as obj_lib
 import tensorflow.compat.v2 as tf
 import tensorflow_datasets as tfds
 
-
-
 FLAGS = flags.FLAGS
 
 
@@ -42,7 +40,7 @@ flags.DEFINE_float(
     'sam_rho', 0.,
     'sam rho')
 
-flags.DEFINE_integer('gpu_id', 0., '')
+flags.DEFINE_integer('gpu_id', 0, '')
 
 flags.DEFINE_enum(
     'learning_rate_scaling', 'linear', ['linear', 'sqrt'],
@@ -199,7 +197,7 @@ flags.DEFINE_enum(
     'How the head projection is done.')
 
 flags.DEFINE_integer(
-    'proj_out_dim', 128,
+    'proj_out_dim', 512,
     'Number of head projection dimension.')
 
 flags.DEFINE_integer(
@@ -220,7 +218,7 @@ flags.DEFINE_integer(
     'Multiplier to change width of network.')
 
 flags.DEFINE_integer(
-    'resnet_depth', 50,
+    'resnet_depth', 18,
     'Depth of ResNet.')
 
 flags.DEFINE_float(
