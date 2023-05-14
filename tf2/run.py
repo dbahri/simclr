@@ -506,10 +506,10 @@ def main(argv):
 
   else:
     # For (multiple) GPUs.
-    # strategy = tf.distribute.MirroredStrategy()
-    # logging.info('Running using MirroredStrategy on %d replicas',
-    #              strategy.num_replicas_in_sync)
-    strategy = tf.distribute.OneDeviceStrategy(device="/gpu:0")
+    strategy = tf.distribute.MirroredStrategy()
+    logging.info('Running using MirroredStrategy on %d replicas',
+                 strategy.num_replicas_in_sync)
+    # strategy = tf.distribute.OneDeviceStrategy(device="/gpu:0")
 
   with strategy.scope():
     model = model_lib.Model(num_classes)
@@ -631,12 +631,13 @@ def main(argv):
         gradients = tape.gradient(loss, model.trainable_variables)
         gradients_order2_norm = _gradients_order2_norm(gradients)
         scale = FLAGS.sam_rho / (gradients_order2_norm + 1e-12)
-        for gradient, variable in zip(gradients, model.trainable_variables):
+        trainable_variables = model.trainable_variables
+        for gradient, variable in zip(gradients, trainable_variables):
           epsilon_w = gradient * scale
           _distributed_apply_epsilon_w(variable, epsilon_w)
           epsilon_w_cache.append(epsilon_w)
         with tf.GradientTape() as tape:
-          loss = get_loss(features, labels, model, do_log=False)
+          loss = get_loss(features, labels, model, do_log=True)
           weight_decay = model_lib.add_weight_decay(model, adjust_per_optimizer=True)
           weight_decay_metric.update_state(weight_decay)
           loss += weight_decay
@@ -646,12 +647,12 @@ def main(argv):
         # mean gradient is applied.
         loss = loss / strategy.num_replicas_in_sync
 
-        gradients = tape.gradient(loss, model.trainable_variables)
-        for variable, epsilon_w in zip(model.trainable_variables, epsilon_w_cache):
+        gradients = tape.gradient(loss, trainable_variables)
+        for variable, epsilon_w in zip(trainable_variables, epsilon_w_cache):
           # Restore the variable to its original value before `apply_gradients()`.
           _distributed_apply_epsilon_w(variable, -epsilon_w)
 
-        optimizer.apply_gradients(zip(gradients, model.trainable_variables))
+        optimizer.apply_gradients(zip(gradients, trainable_variables))
 
     with strategy.scope():
 
