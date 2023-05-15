@@ -142,6 +142,10 @@ flags.DEFINE_string(
     'Model directory for training.')
 
 flags.DEFINE_string(
+    'metrics_dir', None,
+    'Model directory for training.')
+
+flags.DEFINE_string(
     'data_dir', None,
     'Directory where dataset is stored.')
 
@@ -352,6 +356,56 @@ def json_serializable(val):
     return False
 
 
+def perform_rank_evaluation(model, builder, ckpt, strategy):
+  summary_writer = tf.summary.create_file_writer(FLAGS.metrics_dir)
+
+  # Build metrics.
+  with strategy.scope():
+    # Restore checkpoint.
+    logging.info('Restoring from %s', ckpt)
+    checkpoint = tf.train.Checkpoint(
+        model=model, global_step=tf.Variable(0, dtype=tf.int64))
+    checkpoint.restore(ckpt).expect_partial()
+    global_step = checkpoint.global_step
+    logging.info('Performing eval at step %d', global_step.numpy())
+
+    def compute_train_rank(percentiles, global_step, n_samples=None):
+      fn = data_lib.get_preprocess_fn(False, False)
+      def map_fn(image, label):
+        image = fn(image)
+        return image
+      dataset = builder.as_dataset(
+          split=FLAGS.train_split,
+          shuffle_files=False,
+          as_supervised=True)
+      dataset = dataset.map(map_fn, num_parallel_calls=tf.data.experimental.AUTOTUNE)
+      dataset = dataset.batch(FLAGS.train_batch_size, drop_remainder=False)
+      dataset = dataset.prefetch(tf.data.experimental.AUTOTUNE)
+      outs = []
+      for feats in iter(dataset):
+        if outs and n_samples and sum([x.shape[0] for x in outs]) >= n_samples:
+          break
+        o, _ = model(feats, training=False)
+        outs.append(o.numpy())
+      outs = np.concatenate(outs, axis=0)
+      if n_samples:
+        outs = outs[:n_samples, :]
+      n_components = calc_pca_rank(outs, np.array(percentiles, dtype=np.float32)/100.)
+      for i, p in enumerate(percentiles):
+        tf.summary.scalar(f'n_components_{p}', n_components[i], global_step)
+
+    with summary_writer.as_default():
+      compute_train_rank([95, 98, 99, 99.9, 99.99], global_step, n_samples=10240)
+
+  # Write summaries
+  cur_step = global_step.numpy()
+  logging.info('Writing summaries for %d step', cur_step)
+  with summary_writer.as_default():
+    metrics.log_and_write_metrics_to_summary([], cur_step)
+    summary_writer.flush()
+
+
+
 def perform_evaluation(model, builder, eval_steps, ckpt, strategy, topology):
   """Perform evaluation."""
   if FLAGS.train_mode == 'pretrain' and not FLAGS.lineareval_while_pretraining:
@@ -528,7 +582,14 @@ def main(argv):
   with strategy.scope():
     model = model_lib.Model(num_classes)
 
-  if FLAGS.mode == 'eval':
+  if FLAGS.mode == 'rank_eval':
+    for ckpt in tf.train.checkpoints_iterator(
+        FLAGS.model_dir, min_interval_secs=15):
+      perform_rank_evaluation(model, builder, ckpt, strategy)
+      if result['global_step'] >= train_steps:
+        logging.info('Eval complete. Exiting...')
+        return
+  elif FLAGS.mode == 'eval':
     for ckpt in tf.train.checkpoints_iterator(
         FLAGS.model_dir, min_interval_secs=15):
       result = perform_evaluation(model, builder, eval_steps, ckpt, strategy,
