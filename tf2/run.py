@@ -405,7 +405,7 @@ def perform_rank_evaluation(model, builder, ckpt, strategy):
           tf.summary.scalar(f'n_components_{name}_{p}', n_components[i], global_step)
 
     with summary_writer.as_default():
-      compute_train_rank([95, 98, 99, 99.9, 99.99], global_step, n_samples=10240)
+      compute_train_rank([95, 98, 99, 99.9, 99.99, 99.999, 99.9999, 99.99999], global_step, n_samples=10240)
 
   # Write summaries
   cur_step = global_step.numpy()
