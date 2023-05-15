@@ -586,9 +586,7 @@ def main(argv):
     for ckpt in tf.train.checkpoints_iterator(
         FLAGS.model_dir, min_interval_secs=15):
       perform_rank_evaluation(model, builder, ckpt, strategy)
-      if result['global_step'] >= train_steps:
-        logging.info('Eval complete. Exiting...')
-        return
+    return
   elif FLAGS.mode == 'eval':
     for ckpt in tf.train.checkpoints_iterator(
         FLAGS.model_dir, min_interval_secs=15):
