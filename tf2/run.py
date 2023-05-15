@@ -583,8 +583,13 @@ def main(argv):
     model = model_lib.Model(num_classes)
 
   if FLAGS.mode == 'rank_eval':
-    for ckpt in tf.train.checkpoints_iterator(
-        FLAGS.model_dir, min_interval_secs=15):
+    steps = []
+    for name in os.listdir(FLAGS.model_dir):
+      if 'ckpt-' in name and 'index' in name:
+        step = int(name.split('-')[1].split('.')[0])
+        steps.append(step)
+    for step in sorted(steps):
+      ckpt = os.path.join(FLAGS.model_dir, f'ckpt-{step}')
       perform_rank_evaluation(model, builder, ckpt, strategy)
     return
   elif FLAGS.mode == 'eval':
