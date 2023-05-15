@@ -382,17 +382,27 @@ def perform_rank_evaluation(model, builder, ckpt, strategy):
       dataset = dataset.batch(FLAGS.train_batch_size, drop_remainder=False)
       dataset = dataset.prefetch(tf.data.experimental.AUTOTUNE)
       outs = []
+      sups = []
+      hiddens = []
       for feats in iter(dataset):
         if outs and n_samples and sum([x.shape[0] for x in outs]) >= n_samples:
           break
-        o, _ = model(feats, training=False)
+        o, s, h = model(feats, training=False, return_hidden=True)
         outs.append(o.numpy())
+        sups.append(s.numpy())
+        hiddens.append(h.numpy())
       outs = np.concatenate(outs, axis=0)
+      sups = np.concatenate(sups, axis=0)
+      hiddens = np.concatenate(hiddens, axis=0)
       if n_samples:
         outs = outs[:n_samples, :]
-      n_components = calc_pca_rank(outs, np.array(percentiles, dtype=np.float32)/100.)
-      for i, p in enumerate(percentiles):
-        tf.summary.scalar(f'n_components_{p}', n_components[i], global_step)
+        sups = sups[:n_samples, :]
+        hiddens = hiddens[:n_samples, :]
+      outs = tf.math.l2_normalize(outs, axis=1).numpy()
+      for (name, data) in [('outs', outs), ('hidden', hiddens)]:
+        n_components = calc_pca_rank(data, np.array(percentiles, dtype=np.float32)/100.)
+        for i, p in enumerate(percentiles):
+          tf.summary.scalar(f'n_components_{name}_{p}', n_components[i], global_step)
 
     with summary_writer.as_default():
       compute_train_rank([95, 98, 99, 99.9, 99.99], global_step, n_samples=10240)
